@@ -1,0 +1,1 @@
+# spring-manifest-poc
