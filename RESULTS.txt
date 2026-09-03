@@ -1,0 +1,15 @@
+RESULTS="$(
+  helm template my-release "$HELM_DIR" \
+  | yq eval -r '
+      select(.kind == "Deployment")
+      | .metadata.name as $d
+      | (
+          (.spec.template.spec.initContainers // [])
+          + (.spec.template.spec.containers // [])
+        )[]
+      | select(.image != null and .image != "")
+      | "\($d)|\(.image)"
+    ' \
+  | sed '/^[[:space:]]*$/d' \
+  | sort -u
+)"
