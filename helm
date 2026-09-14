@@ -1,0 +1,279 @@
+name: ArgoCD Deployment Workflow - External Vendor (Helm)
+
+on:
+  workflow_call:
+    inputs:
+      cluster-ip:
+        description: "Cluster IP for Argo CD destination"
+        required: true
+        type: string
+      cluster-namespace:
+        description: "Cluster namespace for deployment"
+        required: true
+        type: string
+      manifests-repo:
+        description: "GitHub repository containing Helm charts"
+        required: true
+        type: string
+      application-module:
+        description: "Chart directory name inside <deployment-environment>/"
+        required: true
+        type: string
+      deployment-environment:
+        description: "Deployment environment (e.g., sit, uat, prod)"
+        required: true
+        type: string
+      argo-project:
+        description: "Project for Argo CD"
+        required: true
+        type: string
+      deployments:
+        description: "List of deployment resources (newline separated)"
+        required: false
+        type: string
+      release-name:
+        description: "Deploy instance of the Helm chart in a Kubernetes cluster."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      ARGOCD_SERVER:
+        description: "Argo CD server address"
+        required: true
+      ARGOCD_USERNAME:
+        description: "Argo CD username"
+        required: true
+      ARGOCD_PASSWORD:
+        description: "Argo CD password"
+        required: true
+      COMMON_USER:
+        description: "GitHub user for repo linking"
+        required: true
+      COMMON_USER_TOKEN:
+        description: "GitHub token for repo linking"
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy Application
+    runs-on: [self-hosted, linux]
+    environment: sit-integration
+    env:
+      ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+      ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
+      ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
+      CLUSTER_IP: ${{ inputs.cluster-ip }}
+      DEPLOYMENTS: ${{ inputs.deployments }}
+      CHART_SUBPATH: ${{ inputs.deployment-environment }}/${{ inputs.application-module }}
+
+    steps:
+      - name: Prepare Argo CD CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK_DIR="$HOME/.local/bin"
+          mkdir -p "$WORK_DIR"
+          if [ ! -x "$WORK_DIR/argocd" ]; then
+            wget -qO "$WORK_DIR/argocd" "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64"
+          fi
+          chmod +x "$WORK_DIR/argocd"
+          echo "$WORK_DIR" >> "$GITHUB_PATH"
+
+      - name: Login to Argo CD
+        shell: bash
+        run: |
+          set -euo pipefail
+          argocd login "$ARGOCD_SERVER" \
+            --username "$ARGOCD_USERNAME" \
+            --password "$ARGOCD_PASSWORD" \
+            --insecure \
+            --skip-test-tls
+          sleep 20
+
+      - name: Construct Repo URL
+        id: repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_NAME="$(basename "${GITHUB_REPOSITORY}")"
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+          echo "repo_name=$REPO_NAME" >> "$GITHUB_OUTPUT"
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Construct Manifest Repo URL
+        id: manifest_repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_NAME="sampathbankplc/${{ inputs.manifests-repo }}"
+          REPO_URL="https://github.com/$REPO_NAME.git"
+          echo "manifest_repo_name=$REPO_NAME" >> "$GITHUB_OUTPUT"
+          echo "manifest_repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Link Git Repository to Argo CD
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! argocd repo list | grep -F "${{ steps.manifest_repo.outputs.manifest_repo_url }}" >/dev/null; then
+            argocd repo add "${{ steps.manifest_repo.outputs.manifest_repo_url }}" \
+              --username "${{ secrets.COMMON_USER }}" \
+              --password "${{ secrets.COMMON_USER_TOKEN }}" \
+              --project "${{ inputs.argo-project }}" \
+              --proxy "http://192.168.6.60:8080"
+          fi
+
+      - name: Define Chart Workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHART_WORKSPACE="${{ github.workspace }}/${{ github.run_id }}-charts-deploy"
+          mkdir -p "$CHART_WORKSPACE"
+          echo "CHART_WORKSPACE=$CHART_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Checkout charts repository
+        uses: actions/checkout@v6
+        with:
+          repository: sampathbankplc/${{ inputs.manifests-repo }}
+          token: ${{ secrets.COMMON_USER_TOKEN }}
+          path: ${{ env.CHART_WORKSPACE }}/manifest-repo
+          ref: main
+
+      - name: Resolve chart directory
+        id: chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_ROOT="${{ env.CHART_WORKSPACE }}/manifest-repo"
+          CHART_DIR="$REPO_ROOT/$CHART_SUBPATH"
+
+          if [ ! -d "$CHART_DIR" ]; then
+            echo "ERROR: chart directory not found: $CHART_SUBPATH"
+            exit 1
+          fi
+          if [ ! -f "$CHART_DIR/Chart.yaml" ]; then
+            echo "ERROR: no Chart.yaml in $CHART_SUBPATH - this path is not a Helm chart."
+            echo "       If this module is still raw manifests, call the non-Helm workflow."
+            exit 1
+          fi
+
+          RELEASE_NAME="${{ inputs.release-name }}"
+          if [ -z "$RELEASE_NAME" ]; then
+            RELEASE_NAME="${{ inputs.application-module }}"
+          fi
+          RELEASE_NAME="$(echo "$RELEASE_NAME" | tr '/_' '-' | tr '[:upper:]' '[:lower:]')"
+
+          echo "repo_root=$REPO_ROOT"       >> "$GITHUB_OUTPUT"
+          echo "chart_dir=$CHART_DIR"       >> "$GITHUB_OUTPUT"
+          echo "release_name=$RELEASE_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "--- Chart.yaml ---"
+          cat "$CHART_DIR/Chart.yaml"
+
+      - name: Get charts repo commit SHA
+        id: manifest_sha
+        working-directory: ${{ env.CHART_WORKSPACE }}/manifest-repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST_SHA="$(git rev-parse HEAD)"
+          echo "manifest_sha=$MANIFEST_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Update Argo CD Project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ inputs.argo-project }}"
+          REPO="${{ steps.manifest_repo.outputs.manifest_repo_url }}"
+          NAMESPACE="${{ inputs.cluster-namespace }}"
+
+          argocd proj get "$PROJECT" >/dev/null
+          argocd proj allow-cluster-resource "$PROJECT" "" Namespace || true
+
+          if ! argocd proj get "$PROJECT" -o json | jq -e \
+            --arg server "$CLUSTER_IP" \
+            --arg ns "$NAMESPACE" \
+            '(.spec.destinations // [])[] | select(.server == $server and .namespace == $ns)' >/dev/null; then
+            argocd proj add-destination "$PROJECT" "$CLUSTER_IP" "$NAMESPACE"
+          fi
+
+          if ! argocd proj get "$PROJECT" -o json | jq -e \
+            --arg repo "$REPO" \
+            '(.spec.sourceRepos // [])[] | select(. == $repo)' >/dev/null; then
+            argocd proj add-source "$PROJECT" "$REPO"
+          fi
+
+      - name: Create Argo CD Application
+        id: create_app
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_NAME="$(echo "${{ inputs.argo-project }}-${{ inputs.application-module }}" | tr '/_' '-' | tr '[:upper:]' '[:lower:]')"
+          echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
+
+          if ! argocd app get "$APP_NAME" >/dev/null 2>&1; then
+            argocd app create "$APP_NAME" \
+              --repo "${{ steps.manifest_repo.outputs.manifest_repo_url }}" \
+              --path "$CHART_SUBPATH" \
+              --dest-server "$CLUSTER_IP" \
+              --dest-namespace "${{ inputs.cluster-namespace }}" \
+              --project "${{ inputs.argo-project }}" \
+              --revision "${{ steps.manifest_sha.outputs.manifest_sha }}" \
+              --release-name "${{ steps.chart.outputs.release_name }}" \
+              --sync-option CreateNamespace=true \
+              --sync-policy none
+            argocd app sync "$APP_NAME" --grpc-web --prune
+            argocd app wait "$APP_NAME" --health --timeout 900
+            echo "already_synced=true" >> "$GITHUB_ENV"
+          else
+            # Guard against silently converting a directory-source app to Helm.
+            HELM_BLOCK="$(argocd app get "$APP_NAME" -o json | jq -r '.spec.source.helm // empty')"
+            if [ -z "$HELM_BLOCK" ]; then
+              echo "WARNING: existing app '$APP_NAME' has no helm block in its source."
+              echo "         It is being converted from a directory source to Helm."
+            fi
+
+            argocd app set "$APP_NAME" \
+              --repo "${{ steps.manifest_repo.outputs.manifest_repo_url }}" \
+              --path "$CHART_SUBPATH" \
+              --revision "${{ steps.manifest_sha.outputs.manifest_sha }}"
+            echo "already_synced=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Sync Argo CD App
+        if: env.already_synced == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIFF_EXIT_CODE=0
+          argocd app diff "$APP_NAME" --grpc-web --hard-refresh --exit-code > /tmp/app_diff.txt || DIFF_EXIT_CODE=$?
+
+          if [ "$DIFF_EXIT_CODE" -eq 0 ]; then
+            # No rendered change. Only meaningful for charts with a static tag.
+            if [ -z "${DEPLOYMENTS:-}" ]; then
+              echo "No diff and no 'deployments' input - nothing to roll out."
+              exit 0
+            fi
+            while IFS= read -r DEPLOYMENT_NAME; do
+              [ -z "$DEPLOYMENT_NAME" ] && continue
+              echo "Restarting deployment: $DEPLOYMENT_NAME"
+              argocd app actions run "$APP_NAME" restart \
+                --kind Deployment \
+                --resource-name "$DEPLOYMENT_NAME"
+            done <<< "$DEPLOYMENTS"
+          elif [ "$DIFF_EXIT_CODE" -eq 1 ]; then
+            cat /tmp/app_diff.txt || true
+            argocd app sync "$APP_NAME" --grpc-web --prune
+          else
+            cat /tmp/app_diff.txt || true
+            exit "$DIFF_EXIT_CODE"
+          fi
+
+          argocd app wait "$APP_NAME" --health --sync --timeout 900
+
+      - name: Cleanup Job Resources
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "${{ env.CHART_WORKSPACE }}"
