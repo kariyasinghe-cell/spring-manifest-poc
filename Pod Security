@@ -1,88 +1,28 @@
-Pod Security Admission can be set in two places: **namespace labels**, and a **cluster-wide default** in the API server's admission config. Namespace labels override the default. The `restricted:latest` in your error means either an `enforce=restricted` label with no version label, or a cluster default of `restricted`.
-
-## 1. Namespace labels
-
-All namespaces with their PSA levels:
-
-```bash
-kubectl get ns -L pod-security.kubernetes.io/enforce,pod-security.kubernetes.io/enforce-version,pod-security.kubernetes.io/warn,pod-security.kubernetes.io/audit
-```
-
-Only the ones enforcing `restricted`:
-
-```bash
-kubectl get ns -l pod-security.kubernetes.io/enforce=restricted
-```
-
-All `pod-security` labels on one namespace:
-
-```bash
-kubectl get ns <ns> -o json | jq '.metadata.labels | with_entries(select(.key | startswith("pod-security")))'
-```
-
-If the failing namespace has **no** `enforce` label, the restriction comes from the cluster default (section 2).
-
-## 2. Cluster-wide default
-
-This is set in an `AdmissionConfiguration` file passed to kube-apiserver via `--admission-control-config-file`.
-
-**Self-managed clusters (kubeadm, kind):**
-
-```bash
-# on a control-plane node
-grep admission-control-config-file /etc/kubernetes/manifests/kube-apiserver.yaml
-cat <path-from-above>
-```
-
-Look for the `PodSecurity` plugin section:
-
-```yaml
-plugins:
-- name: PodSecurity
-  configuration:
-    defaults:
-      enforce: "restricted"
-      enforce-version: "latest"
-    exemptions:
-      namespaces: ["kube-system", ...]
-```
-
-For kind, check the `kubeadmConfigPatches` / `extraArgs` in your cluster config.
-
-**Managed clusters:** you can't read the API server flags directly.
-- **EKS and standard GKE:** the default is `privileged`, so a `restricted` error there almost always comes from a namespace label.
-- **VMware Tanzu (TKG 2.x, TKr v1.25+):** clusters enforce `restricted` cluster-wide by default. This is likely the cause if the namespace is unlabeled. The default is controlled by the `podSecurityStandard` variable in the Cluster spec (ClusterClass). Check it with:
-
-```bash
-kubectl get cluster <name> -n <vsphere-ns> -o yaml | grep -A5 podSecurityStandard
-```
-
-  Run that against the Supervisor or management cluster, not the workload cluster. You can still override the default per namespace with labels.
-
-## 3. Test the effective level
-
-This works regardless of where the setting comes from, because server-side dry-run goes through admission:
-
-```bash
-kubectl run psa-test --image=nginx -n <ns> --dry-run=server
-```
-
-If the namespace enforces `restricted`, this returns the same `violates PodSecurity "restricted:latest"` error. Otherwise it succeeds.
-
-To preview what would break **before** tightening a namespace:
-
-```bash
-kubectl label --dry-run=server --overwrite ns <ns> pod-security.kubernetes.io/enforce=restricted
-```
-
-This prints a warning for each existing pod that would violate the policy, without changing anything. Use `--all` instead of `<ns>` to check every namespace at once.
-
-## Note on other policy engines
-
-The `violates PodSecurity` wording comes specifically from the built-in PSA controller. If you later see similar-looking denials with different wording, check for Kyverno or Gatekeeper:
-
-```bash
-kubectl get validatingwebhookconfigurations
-kubectl get clusterpolicies 2>/dev/null        # Kyverno
-kubectl get constrainttemplates 2>/dev/null    # Gatekeeper
-```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-hello-world
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-world
+  template:
+    metadata:
+      labels:
+        app: hello-world
+    spec:
+      # Pod-level security context
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: hello-world
+        image: your-hello-world-image:latest
+        # Container-level security context
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
