@@ -1,3 +1,237 @@
+Looking at your HTTPProxy configuration, there are several YAML syntax issues. Here's the corrected version:
+
+```yaml
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: prometheus-platform-services
+  namespace: default
+spec:
+  virtualhost:
+    fqdn: prometheus-platform-services-test-dc02.sampath.int
+    tls:
+      secretName: prometheus-tls
+  routes:
+    - conditions:
+        - prefix: /alertmanager/
+      pathRewritePolicy:
+        replacePrefix:
+          - prefix: /alertmanager/
+            replacement: /
+      services:
+        - name: alertmanager
+          port: 80
+    - conditions:
+        - prefix: /
+      pathRewritePolicy:
+        replacePrefix:
+          - prefix: /
+            replacement: /
+      services:
+        - name: prometheus-server
+          port: 80
+```
+
+**Key fixes:**
+
+1. **`virtualhost` moved to top-level** — Must be at the same indentation as `routes`, not nested inside them
+2. **`routes` is an array** — Each route needs a dash (`-`) prefix
+3. **`conditions` is an array** — Each condition (like `prefix`) needs to be a list item with a dash
+4. **`replacePrefix` is an array** — The replacement rules go in a list, not a single object
+5. **`services` is an array** — Each service needs a dash prefix
+6. **Route order matters** — More specific routes (`/alertmanager/`) should come before catch-all routes (`/`)
+
+**Why the order is important:** Contour evaluates routes in order and stops at the first match. If `/` comes first, it'll match everything before reaching the `/alertmanager/` route.
+
+You'll also want to replace the placeholder values:
+- `<httpproxy-name>` → your actual name (I used `prometheus-platform-services`)
+- `<namespace>` → your namespace (I used `default`)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+I'll break down the HTTPProxy configuration piece by piece:
+
+## **What is HTTPProxy?**
+
+HTTPProxy is a Contour (Kubernetes ingress controller) resource that routes external traffic to your services. Think of it like an nginx config, but native to Kubernetes.
+
+## **Top-level structure:**
+
+```yaml
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: prometheus-platform-services
+  namespace: default
+```
+- **apiVersion/kind**: Tells Kubernetes this is a Contour HTTPProxy
+- **metadata**: Identifies this resource (name + namespace)
+
+---
+
+## **VirtualHost (the domain)**
+
+```yaml
+spec:
+  virtualhost:
+    fqdn: prometheus-platform-services-test-dc02.sampath.int
+    tls:
+      secretName: prometheus-tls
+```
+
+**`virtualhost`** = the external domain that clients use to reach your services
+- **`fqdn`**: The full domain name (`prometheus-platform-services-test-dc02.sampath.int`)
+- **`tls.secretName`**: Kubernetes Secret containing SSL/TLS certificates for HTTPS
+
+This must be at the **top level** of `spec` because it defines the entire virtual host, not individual routes.
+
+---
+
+## **Routes (the rules)**
+
+```yaml
+  routes:
+    - conditions:
+        - prefix: /alertmanager/
+      pathRewritePolicy:
+        replacePrefix:
+          - prefix: /alertmanager/
+            replacement: /
+      services:
+        - name: alertmanager
+          port: 80
+```
+
+Each route is a rule: **"If request matches X, send to service Y"**
+
+### **Route 1: AlertManager**
+
+```yaml
+conditions:
+  - prefix: /alertmanager/
+```
+**Condition**: Match requests starting with `/alertmanager/`
+
+```yaml
+pathRewritePolicy:
+  replacePrefix:
+    - prefix: /alertmanager/
+      replacement: /
+```
+**Path Rewrite**: Strip `/alertmanager/` from the path before forwarding
+- Request: `https://prometheus-platform-services-test-dc02.sampath.int/alertmanager/api/v1/alerts`
+- Sent to AlertManager as: `/api/v1/alerts`
+
+```yaml
+services:
+  - name: alertmanager
+    port: 80
+```
+**Service**: Forward to the `alertmanager` Kubernetes service on port 80
+
+### **Route 2: Prometheus (catch-all)**
+
+```yaml
+    - conditions:
+        - prefix: /
+      pathRewritePolicy:
+        replacePrefix:
+          - prefix: /
+            replacement: /
+      services:
+        - name: prometheus-server
+          port: 80
+```
+
+**Condition**: Match everything else (`/`)
+**Path Rewrite**: Keep the path as-is (rewrite `/` to `/`)
+**Service**: Forward to `prometheus-server`
+
+---
+
+## **Visual Flow**
+
+```
+Request: https://prometheus-platform-services-test-dc02.sampath.int/alertmanager/api/v1/alerts
+                                                                       ↓
+                                        Does it match prefix: /alertmanager/ ?
+                                                    ↓ YES
+                                        Strip /alertmanager/ from path
+                                                    ↓
+                                        Forward /api/v1/alerts
+                                        to alertmanager:80
+                                        
+---
+
+Request: https://prometheus-platform-services-test-dc02.sampath.int/graph
+                                                                       ↓
+                                        Does it match prefix: /alertmanager/ ?
+                                                    ↓ NO
+                                        Does it match prefix: / ?
+                                                    ↓ YES
+                                        Forward /graph to prometheus-server:80
+```
+
+---
+
+## **Why arrays? (The dash `-`)**
+
+```yaml
+routes:           # Array of routes
+  - conditions:   # First route starts here
+    - prefix: /   # Array of conditions
+  - conditions:   # Second route
+    - prefix: /alertmanager/
+```
+
+YAML arrays need the dash prefix. Without it, you can't have multiple routes or conditions.
+
+---
+
+## **Order matters**
+
+Routes are evaluated **top to bottom**. The first match wins. That's why `/alertmanager/` comes **before** `/` — otherwise, `/` would match everything and `/alertmanager/` would never be reached.
+
+Does this clear it up? Any specific part you want me to dive deeper into?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
